@@ -147,7 +147,6 @@ class Application:
             "llm": self._handle_llm_message,
             "iot": self._handle_iot_message,
             "mcp": self._handle_mcp_message,
-            "video": self._handle_video_message,
         }
 
         # 并发控制锁 - 将在_initialize_async_objects中初始化
@@ -1224,7 +1223,7 @@ class Application:
             config = VideoManagerConfig(
                 auto_start=True,  # 自动启动
                 error_callback=self._handle_video_error,
-                text_callback=self._on_video_analysis_text
+                text_callback=self._send_text_tts
             )
             
             # 创建视频管理器
@@ -1304,7 +1303,7 @@ class Application:
                 
                 # 通过文本通道发送
                 await self.protocol.send_text(json.dumps(message, ensure_ascii=False))
-                logger.debug(f"已通过文本通道发送视频分析结果: {len(text)} 字符")
+                logger.info(f"已通过文本通道发送视频分析结果: {len(text)} 字符")
             
         except Exception as e:
             logger.error(f"发送视频分析文本结果失败: {e}")
@@ -1343,70 +1342,6 @@ class Application:
                 logger.info(f"执行物联网命令结果: {result}")
             except Exception as e:
                 logger.error(f"执行物联网命令失败: {e}")
-
-    async def _handle_video_message(self, data):
-        """
-        处理视频相关消息.
-        """
-        try:
-            message_type = data.get("type", "")
-            
-            if message_type == "control":
-                await self._handle_video_control(data)
-            elif message_type == "config":
-                await self._handle_video_config(data)
-            elif message_type == "query":
-                await self._handle_video_query(data)
-            else:
-                logger.warning(f"未知的视频消息类型: {message_type}")
-                
-        except Exception as e:
-            logger.error(f"处理视频消息失败: {e}")
-
-    async def _handle_video_control(self, data):
-        """处理视频控制消息"""
-        if not self.video_manager:
-            return
-            
-        action = data.get("action", "")
-        
-        if action == "start":
-            await self.video_manager.start()
-        elif action == "stop":
-            await self.video_manager.stop()
-        elif action == "pause":
-            self.video_manager.enable_processing(False)
-        elif action == "resume":
-            self.video_manager.enable_processing(True)
-        else:
-            logger.warning(f"未知的视频控制动作: {action}")
-
-    async def _handle_video_config(self, data):
-        """处理视频配置消息"""
-        if not self.video_manager:
-            return
-            
-        target_fps = data.get("target_fps")
-        if target_fps is not None:
-            self.video_manager.set_target_fps(target_fps)
-            
-        # 可以添加更多配置项
-
-    async def _handle_video_query(self, data):
-        """处理视频查询消息"""
-        if not self.video_manager:
-            return
-            
-        query_type = data.get("query", "")
-        
-        if query_type == "status":
-            status = self.video_manager.get_status()
-            await self.protocol.send_video_status(status)
-        elif query_type == "stats":
-            stats = self.video_manager.get_performance_stats()
-            await self.protocol.send_video_stats(stats)
-        else:
-            logger.warning(f"未知的视频查询类型: {query_type}")
 
     async def _update_iot_states(self, delta=None):
         """
