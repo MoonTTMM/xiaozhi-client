@@ -6,6 +6,7 @@
 
 import asyncio
 import time
+import cv2
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass
 from src.utils.logging_config import get_logger
@@ -37,6 +38,10 @@ class VideoManagerConfig:
     auto_session_trigger: bool = True
     # 文本输出配置
     text_callback: Optional[Callable] = None
+    # 视频帧回显配置
+    enable_frame_echo: bool = True
+    echo_window_name: str = "Video Processing"
+    echo_fps_limit: int = 10
 
 
 class VideoManager:
@@ -88,6 +93,10 @@ class VideoManager:
         self._last_stats_update = time.time()
         self._last_event_time = 0.0  # 初始化为0，确保第一次可以发送
         self._events_detected = 0
+        
+        # 视频帧回显相关
+        self._last_echo_time = 0.0
+        self._echo_frame_count = 0
         
         # 设置默认事件阈值
         if self.config.event_thresholds is None:
@@ -236,6 +245,14 @@ class VideoManager:
                 self.stats["total_runtime"] += time.time() - self.stats["start_time"]
                 self.stats["start_time"] = 0
             
+            # 清理视频帧回显窗口
+            if self.config.enable_frame_echo:
+                try:
+                    cv2.destroyAllWindows()
+                    logger.info("视频回显窗口已关闭")
+                except Exception as e:
+                    logger.warning(f"关闭视频回显窗口失败: {e}")
+            
             logger.info("视频管理器已停止")
             
         except Exception as e:
@@ -270,6 +287,9 @@ class VideoManager:
                 # 处理帧
                 results = await self.frame_processor.process_frame(frame)
                 
+                # 视频帧回显
+                # self._echo_frame(frame)
+                
                 # 更新统计信息
                 self._update_stats(len(results))
                 
@@ -303,6 +323,31 @@ class VideoManager:
             # 更新运行时间
             if self.stats["start_time"] > 0:
                 self.stats["total_runtime"] = current_time - self.stats["start_time"]
+    
+    def _echo_frame(self, frame):
+        """显示视频帧回显"""
+        if not self.config.enable_frame_echo:
+            return
+        
+        try:
+            current_time = time.time()
+            
+            # 帧率限制
+            if self.config.echo_fps_limit > 0:
+                time_interval = 1.0 / self.config.echo_fps_limit
+                if current_time - self._last_echo_time < time_interval:
+                    return
+            
+            # 显示帧
+            cv2.imshow(self.config.echo_window_name, frame)
+            cv2.waitKey(1)  # 非阻塞显示
+            
+            # 更新回显统计
+            self._last_echo_time = current_time
+            self._echo_frame_count += 1
+            
+        except Exception as e:
+            logger.warning(f"视频帧回显失败: {e}")
     
     def add_analyzer(self, analyzer: BaseVideoAnalyzer):
         """添加分析器"""
@@ -369,11 +414,11 @@ class VideoManager:
             text_results = []
             
             for result in results:
-                if hasattr(result, 'analyzer') and hasattr(result.analyzer, 'get_text_result'):
+                if hasattr(result, 'data'):
                     # 检查事件是否超过阈值
                     if self._is_significant_event(result):
                         significant_events.append(result)
-                        text = result.analyzer.get_text_result(result.data)
+                        text = result.data['analysis_text']
                         if text:
                             text_results.append(text)
             
@@ -400,10 +445,10 @@ class VideoManager:
     def _is_significant_event(self, result) -> bool:
         """判断是否为显著事件（超过阈值）"""
         try:
-            if not hasattr(result, 'analyzer') or not hasattr(result, 'data'):
+            if not hasattr(result, 'analyzer_name') or not hasattr(result, 'data'):
                 return False
             
-            analyzer_name = result.analyzer.name
+            analyzer_name = result.analyzer_name
             data = result.data
             
             # 根据分析器类型检查不同的阈值
@@ -423,10 +468,7 @@ class VideoManager:
                     logger.info(f"🚨 检测到摔倒事件！置信度: {fall_confidence:.2f}")
                     return True
                 
-                # 运动强度超过阈值或检测到多个运动区域
-                result = motion_intensity > threshold or motion_regions_count >= 2
-                logger.debug(f"运动检测结果: {result}")
-                return result
+                return False
                 
             elif analyzer_name == "color_analyzer":
                 # 颜色分析：检查颜色变化程度
