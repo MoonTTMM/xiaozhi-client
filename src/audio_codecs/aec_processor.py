@@ -38,7 +38,7 @@ class AECProcessor:
         # 缓冲区
         self._reference_buffer = deque()
         self._webrtc_frame_size = 160  # WebRTC标准：16kHz, 10ms = 160 samples
-        self._system_frame_size = AudioConfig.INPUT_SAMPLE_RATE  # 系统配置的帧大小
+        self._system_frame_size = AudioConfig.INPUT_FRAME_SIZE  # 系统配置的帧大小
         
         # 状态标志
         self._is_initialized = False

@@ -381,7 +381,7 @@ class AudioCodec:
             if len(resampled_data) > 0:
                 self._resample_input_buffer.extend(resampled_data.astype(np.int16))
 
-            expected_frame_size = AudioConfig.INPUT_SAMPLE_RATE
+            expected_frame_size = AudioConfig.INPUT_FRAME_SIZE
             if len(self._resample_input_buffer) < expected_frame_size:
                 return None
 
