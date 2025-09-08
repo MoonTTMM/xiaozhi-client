@@ -93,6 +93,8 @@ class VLCamera(BaseCamera):
 
             # 直接将图像编码为JPEG字节流
             success, jpeg_data = cv2.imencode(".jpg", frame)
+            # 存储图片方便后续查看
+            cv2.imwrite("logs/camera_image.jpg", frame)
 
             if not success:
                 logger.error("Failed to encode image to JPEG")

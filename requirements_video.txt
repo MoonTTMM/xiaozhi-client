@@ -1,0 +1,28 @@
+# 视频处理核心依赖
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# 异步支持
+asyncio-mqtt>=0.16.0
+aiofiles>=23.0.0
+
+# 图像处理增强
+scikit-image>=0.21.0
+scipy>=1.11.0
+
+# 机器学习支持（可选）
+tensorflow>=2.13.0
+torch>=2.0.0
+
+# 视频编码
+ffmpeg-python>=0.2.0
+
+# 日志和配置
+python-dotenv>=1.0.0
+PyYAML>=6.0
+
+# 测试依赖
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0

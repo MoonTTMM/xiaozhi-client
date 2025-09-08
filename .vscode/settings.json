@@ -18,10 +18,7 @@
     "--max-line-length=88",
     "--extend-ignore=E203,W503,E501"
   ],
-  "python.sortImports.args": [
-    "--profile=black",
-    "--line-length=88"
-  ],
+  "python.sortImports.args": ["--profile=black", "--line-length=88"],
   "[python]": {
     "editor.defaultFormatter": "ms-python.black-formatter",
     "editor.formatOnSave": true,
@@ -32,5 +29,6 @@
   "autoDocstring.docstringFormat": "google",
   "python.analysis.autoImportCompletions": true,
   "python.linting.pylintEnabled": false,
-  "python.linting.mypyEnabled": false
+  "python.linting.mypyEnabled": false,
+  "cursorpyright.analysis.autoImportCompletions": true
 }

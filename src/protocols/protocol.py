@@ -215,3 +215,28 @@ class Protocol:
         }
 
         await self.send_text(json.dumps(message))
+
+
+    async def send_video_status(self, status: dict):
+        """
+        发送视频状态信息.
+        """
+        message = {
+            "session_id": self.session_id,
+            "type": "video",
+            "action": "status",
+            "data": status
+        }
+        await self.send_text(json.dumps(message))
+
+    async def send_video_stats(self, stats: dict):
+        """
+        发送视频统计信息.
+        """
+        message = {
+            "session_id": self.session_id,
+            "type": "video",
+            "action": "stats",
+            "data": stats
+        }
+        await self.send_text(json.dumps(message))
