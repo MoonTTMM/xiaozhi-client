@@ -128,6 +128,8 @@ class MotionDetector(BaseVideoAnalyzer):
                 fall_detection_result = self._detect_fall(frame, motion_regions, motion_intensity)
                 motion_result.update(fall_detection_result)
             
+            motion_result["analysis_text"] = self.get_text_result(motion_result)
+
             return motion_result
             
         except Exception as e:
@@ -785,12 +787,15 @@ class ColorAnalyzer(BaseVideoAnalyzer):
                 if data["dominant"]
             ]
             
-            return {
+            result = {
                 "color_analysis": color_analysis,
                 "dominant_colors": dominant_colors,
                 "total_pixels": int(total_pixels),
                 "target_colors": self.target_colors
             }
+            result["analysis_text"] = self.get_text_result(result)
+
+            return result
             
         except Exception as e:
             self._add_error(str(e))
@@ -868,8 +873,8 @@ class BrightnessAnalyzer(BaseVideoAnalyzer):
             
             dark_ratio = dark_pixels / total_pixels if total_pixels > 0 else 0
             bright_ratio = bright_pixels / total_pixels if total_pixels > 0 else 0
-            
-            return {
+
+            result = {
                 "mean_brightness": float(mean_brightness),
                 "std_brightness": float(std_brightness),
                 "brightness_status": brightness_status,
@@ -880,6 +885,9 @@ class BrightnessAnalyzer(BaseVideoAnalyzer):
                 "total_pixels": int(total_pixels),
                 "threshold": self.brightness_threshold
             }
+            result["analysis_text"] = self.get_text_result(result)
+            
+            return result
             
         except Exception as e:
             self._add_error(str(e))
@@ -963,7 +971,7 @@ class ObjectCounter(BaseVideoAnalyzer):
             frame_area = frame.shape[0] * frame.shape[1]
             object_density = len(valid_objects) / frame_area if frame_area > 0 else 0
             
-            return {
+            result = {
                 "object_count": len(valid_objects),
                 "objects": valid_objects,
                 "total_object_area": int(total_area),
@@ -971,6 +979,9 @@ class ObjectCounter(BaseVideoAnalyzer):
                 "min_area": self.min_area,
                 "max_area": self.max_area
             }
+            result["analysis_text"] = self.get_text_result(result)
+
+            return result
             
         except Exception as e:
             self._add_error(str(e))
