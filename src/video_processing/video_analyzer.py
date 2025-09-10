@@ -8,8 +8,10 @@
 import cv2
 import numpy as np
 import time
+import json
 from typing import Dict, Any, Optional, List, Tuple
 from .base_analyzer import BaseVideoAnalyzer
+from src.utils.logging_config import get_logger
 
 # 运动检测器
 class MotionDetector(BaseVideoAnalyzer):
@@ -26,6 +28,10 @@ class MotionDetector(BaseVideoAnalyzer):
         """
         super().__init__("motion_detector")
         
+        # 初始化日志记录器
+        self.logger = get_logger(f"{__name__}.MotionDetector")
+        self.fall_logger = get_logger(f"{__name__}.FallDetection")
+        
         self.threshold = threshold
         self.min_area = min_area
         self.enable_fall_detection = enable_fall_detection
@@ -40,13 +46,27 @@ class MotionDetector(BaseVideoAnalyzer):
         # 形态学操作核
         self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         
-        # 摔倒检测相关变量
+        # 摔倒检测相关变量 - 优化版本
         self.fall_detection_history = []  # 存储历史帧的运动信息
-        self.max_history_frames = 15  # 保留最近15帧的历史
-        self.fall_detection_threshold = 0.3  # 摔倒检测阈值（降低阈值提高敏感度）
+        self.max_history_frames = 20  # 增加历史帧数到20帧
+        self.fall_detection_threshold = 0.4  # 提高阈值减少误报
         self.last_fall_time = 0  # 上次检测到摔倒的时间
-        self.fall_cooldown = 5.0  # 摔倒检测冷却时间（秒）
-        self.min_motion_for_fall = 0.01  # 摔倒检测的最小运动强度要求（降低阈值）
+        self.fall_cooldown = 3.0  # 减少冷却时间到3秒
+        self.min_motion_for_fall = 0.02  # 提高最小运动要求
+        
+        # 新增：跌倒检测状态机
+        self.fall_state = "normal"  # normal, potential_fall, falling, fallen
+        self.fall_state_timer = 0
+        self.fall_state_duration = 0
+        
+        # 新增：自适应阈值
+        self.adaptive_threshold = self.fall_detection_threshold
+        self.threshold_adjustment_rate = 0.1
+        
+        # 新增：跌倒特征检测
+        self.vertical_velocity_history = []  # 垂直速度历史
+        self.acceleration_history = []  # 加速度历史
+        self.contour_analysis_history = []  # 轮廓分析历史
         
         # 配置参数
         self.config.update({
@@ -116,7 +136,7 @@ class MotionDetector(BaseVideoAnalyzer):
     
     def _detect_fall(self, frame, motion_regions: List[Dict], motion_intensity: float) -> Dict[str, Any]:
         """
-        检测摔倒事件
+        检测摔倒事件 - 优化版本
         
         Args:
             frame: 当前帧
@@ -128,12 +148,18 @@ class MotionDetector(BaseVideoAnalyzer):
         """
         current_time = time.time()
         
+        # 记录检测开始
+        self.fall_logger.debug(f"开始跌倒检测 - 时间: {current_time:.3f}, 运动区域数: {len(motion_regions)}, 运动强度: {motion_intensity:.4f}")
+        
         # 检查冷却时间
         if current_time - self.last_fall_time < self.fall_cooldown:
+            remaining_cooldown = self.fall_cooldown - (current_time - self.last_fall_time)
+            self.fall_logger.debug(f"冷却时间未结束 - 剩余: {remaining_cooldown:.2f}秒")
             return {
                 "fall_detected": False,
                 "fall_confidence": 0.0,
-                "fall_reason": "cooldown"
+                "fall_reason": "cooldown",
+                "fall_state": self.fall_state
             }
         
         # 创建当前帧的运动信息
@@ -145,6 +171,9 @@ class MotionDetector(BaseVideoAnalyzer):
             "frame_width": frame.shape[1]
         }
         
+        # 计算垂直速度和加速度
+        self._update_motion_metrics(current_motion_info)
+        
         # 添加到历史记录
         self.fall_detection_history.append(current_motion_info)
         
@@ -152,40 +181,60 @@ class MotionDetector(BaseVideoAnalyzer):
         if len(self.fall_detection_history) > self.max_history_frames:
             self.fall_detection_history.pop(0)
         
-        # 需要至少3帧历史才能进行摔倒检测
-        if len(self.fall_detection_history) < 3:
+        # 需要至少5帧历史才能进行摔倒检测
+        if len(self.fall_detection_history) < 5:
+            self.fall_logger.debug(f"历史帧数不足 - 当前: {len(self.fall_detection_history)}, 需要: 5")
             return {
                 "fall_detected": False,
                 "fall_confidence": 0.0,
-                "fall_reason": "insufficient_history"
+                "fall_reason": "insufficient_history",
+                "fall_state": self.fall_state
             }
         
-        # 检查是否有足够的运动强度（降低要求）
+        # 检查是否有足够的运动强度
         if motion_intensity < self.min_motion_for_fall and len(motion_regions) == 0:
+            self.fall_logger.debug(f"运动强度不足 - 当前: {motion_intensity:.4f}, 最小要求: {self.min_motion_for_fall}")
             return {
                 "fall_detected": False,
                 "fall_confidence": 0.0,
-                "fall_reason": "insufficient_motion"
+                "fall_reason": "insufficient_motion",
+                "fall_state": self.fall_state
             }
         
-        # 分析运动模式
-        fall_confidence = self._analyze_fall_pattern()
+        # 更新跌倒状态机
+        self._update_fall_state_machine()
+        
+        # 多维度分析运动模式
+        fall_confidence = self._analyze_fall_pattern_advanced()
+        
+        # 自适应阈值调整
+        self._adjust_adaptive_threshold(fall_confidence)
         
         # 判断是否摔倒
-        fall_detected = fall_confidence > self.fall_detection_threshold
+        fall_detected = fall_confidence > self.adaptive_threshold
         
-        if fall_detected:
+        # 记录检测结果
+        self.fall_logger.info(f"跌倒检测结果 - 置信度: {fall_confidence:.4f}, 阈值: {self.adaptive_threshold:.4f}, 状态: {self.fall_state}, 检测到: {fall_detected}")
+        
+        if fall_detected and self.fall_state == "fallen":
             self.last_fall_time = current_time
+            self.fall_logger.warning(f"检测到跌倒事件！置信度: {fall_confidence:.4f}, 状态: {self.fall_state}, 持续时间: {self.fall_state_duration:.2f}秒")
             return {
                 "fall_detected": True,
                 "fall_confidence": fall_confidence,
-                "fall_reason": "pattern_analysis"
+                "fall_reason": "advanced_pattern_analysis",
+                "fall_state": self.fall_state,
+                "fall_duration": self.fall_state_duration
             }
         else:
+            reason = "below_threshold" if not fall_detected else f"state_{self.fall_state}"
+            self.fall_logger.debug(f"未检测到跌倒 - 原因: {reason}, 置信度: {fall_confidence:.4f}")
             return {
                 "fall_detected": False,
                 "fall_confidence": fall_confidence,
-                "fall_reason": "below_threshold"
+                "fall_reason": reason,
+                "fall_state": self.fall_state,
+                "fall_duration": self.fall_state_duration
             }
     
     def _analyze_fall_pattern(self) -> float:
@@ -306,12 +355,317 @@ class MotionDetector(BaseVideoAnalyzer):
             return min(ratio_change, 1.0)
         
         return 0.0
+    
+    def _update_motion_metrics(self, current_motion_info: Dict[str, Any]):
+        """更新运动指标（速度、加速度等）"""
+        if len(self.fall_detection_history) > 0:
+            # 计算垂直速度
+            previous_info = self.fall_detection_history[-1]
+            time_diff = current_motion_info["timestamp"] - previous_info["timestamp"]
+            
+            if time_diff > 0:
+                # 计算运动区域中心点的垂直位置变化
+                current_center_y = self._get_motion_center_y(current_motion_info["motion_regions"])
+                previous_center_y = self._get_motion_center_y(previous_info["motion_regions"])
+                
+                if current_center_y is not None and previous_center_y is not None:
+                    vertical_velocity = (current_center_y - previous_center_y) / time_diff
+                    self.vertical_velocity_history.append(vertical_velocity)
+                    
+                    # 保持历史长度
+                    if len(self.vertical_velocity_history) > 10:
+                        self.vertical_velocity_history.pop(0)
+                    
+                    # 计算加速度
+                    if len(self.vertical_velocity_history) >= 2:
+                        acceleration = (self.vertical_velocity_history[-1] - self.vertical_velocity_history[-2]) / time_diff
+                        self.acceleration_history.append(acceleration)
+                        
+                        if len(self.acceleration_history) > 10:
+                            self.acceleration_history.pop(0)
+    
+    def _get_motion_center_y(self, motion_regions: List[Dict]) -> Optional[float]:
+        """获取运动区域的垂直中心点"""
+        if not motion_regions:
+            return None
+        
+        # 找到最大的运动区域
+        largest_region = max(motion_regions, key=lambda r: r["area"])
+        return largest_region["y"] + largest_region["height"] / 2
+    
+    def _update_fall_state_machine(self):
+        """更新跌倒状态机"""
+        current_time = time.time()
+        old_state = self.fall_state
+        
+        # 计算当前状态的特征
+        vertical_velocity = self._get_average_vertical_velocity()
+        acceleration = self._get_average_acceleration()
+        motion_intensity = self._get_recent_motion_intensity()
+        
+        # 记录状态机输入参数
+        self.fall_logger.debug(f"状态机更新 - 垂直速度: {vertical_velocity:.2f}, 加速度: {acceleration:.2f}, 运动强度: {motion_intensity:.4f}")
+        
+        # 状态转换逻辑
+        if self.fall_state == "normal":
+            # 检测到快速向下运动，进入潜在跌倒状态
+            if vertical_velocity > 50 and acceleration < -100:  # 快速向下运动
+                self.fall_state = "potential_fall"
+                self.fall_state_timer = current_time
+                self.fall_logger.info(f"状态转换: {old_state} -> {self.fall_state} (快速向下运动检测)")
+        elif self.fall_state == "potential_fall":
+            # 持续快速向下运动，进入跌倒中状态
+            if vertical_velocity > 30 and acceleration < -50:
+                self.fall_state = "falling"
+                self.fall_state_timer = current_time
+                self.fall_logger.info(f"状态转换: {old_state} -> {self.fall_state} (持续快速向下运动)")
+            # 运动停止，回到正常状态
+            elif motion_intensity < 0.01:
+                self.fall_state = "normal"
+                self.fall_logger.info(f"状态转换: {old_state} -> {self.fall_state} (运动停止)")
+        elif self.fall_state == "falling":
+            # 运动停止且位置稳定，进入已跌倒状态
+            if motion_intensity < 0.02 and abs(vertical_velocity) < 10:
+                self.fall_state = "fallen"
+                self.fall_state_timer = current_time
+                self.fall_logger.warning(f"状态转换: {old_state} -> {self.fall_state} (运动停止且位置稳定)")
+            # 运动恢复，回到正常状态
+            elif motion_intensity > 0.05:
+                self.fall_state = "normal"
+                self.fall_logger.info(f"状态转换: {old_state} -> {self.fall_state} (运动恢复)")
+        elif self.fall_state == "fallen":
+            # 检测到明显运动，回到正常状态
+            if motion_intensity > 0.05:
+                self.fall_state = "normal"
+                self.fall_logger.info(f"状态转换: {old_state} -> {self.fall_state} (检测到明显运动)")
+        
+        # 更新状态持续时间
+        self.fall_state_duration = current_time - self.fall_state_timer
+    
+    def _get_average_vertical_velocity(self) -> float:
+        """获取平均垂直速度"""
+        if not self.vertical_velocity_history:
+            return 0.0
+        return sum(self.vertical_velocity_history) / len(self.vertical_velocity_history)
+    
+    def _get_average_acceleration(self) -> float:
+        """获取平均加速度"""
+        if not self.acceleration_history:
+            return 0.0
+        return sum(self.acceleration_history) / len(self.acceleration_history)
+    
+    def _get_recent_motion_intensity(self) -> float:
+        """获取最近的运动强度"""
+        if len(self.fall_detection_history) < 3:
+            return 0.0
+        
+        recent_intensities = [info["motion_intensity"] for info in self.fall_detection_history[-3:]]
+        return sum(recent_intensities) / len(recent_intensities)
+    
+    def _analyze_fall_pattern_advanced(self) -> float:
+        """
+        高级跌倒模式分析 - 多维度特征融合
+        
+        Returns:
+            跌倒置信度 (0.0-1.0)
+        """
+        if len(self.fall_detection_history) < 5:
+            self.fall_logger.debug("历史帧数不足，无法进行高级模式分析")
+            return 0.0
+        
+        confidence = 0.0
+        analysis_details = {}
+        
+        # 1. 垂直运动分析 (权重: 0.3)
+        vertical_score = self._analyze_vertical_movement_advanced()
+        confidence += vertical_score * 0.3
+        analysis_details["vertical_score"] = vertical_score
+        
+        # 2. 速度加速度分析 (权重: 0.25)
+        velocity_score = self._analyze_velocity_pattern()
+        confidence += velocity_score * 0.25
+        analysis_details["velocity_score"] = velocity_score
+        
+        # 3. 形状变化分析 (权重: 0.2)
+        shape_score = self._analyze_shape_change_advanced()
+        confidence += shape_score * 0.2
+        analysis_details["shape_score"] = shape_score
+        
+        # 4. 时序模式分析 (权重: 0.15)
+        temporal_score = self._analyze_temporal_pattern()
+        confidence += temporal_score * 0.15
+        analysis_details["temporal_score"] = temporal_score
+        
+        # 5. 状态机分析 (权重: 0.1)
+        state_score = self._analyze_state_machine_confidence()
+        confidence += state_score * 0.1
+        analysis_details["state_score"] = state_score
+        
+        # 记录详细分析结果
+        self.fall_logger.debug(f"跌倒模式分析详情: {json.dumps(analysis_details, indent=2)}")
+        self.fall_logger.debug(f"综合置信度: {confidence:.4f}")
+        
+        return min(confidence, 1.0)
+    
+    def _analyze_vertical_movement_advanced(self) -> float:
+        """高级垂直运动分析"""
+        if len(self.fall_detection_history) < 5:
+            return 0.0
+        
+        # 分析最近5帧的垂直位置变化
+        recent_frames = self.fall_detection_history[-5:]
+        positions = []
+        
+        for frame_info in recent_frames:
+            center_y = self._get_motion_center_y(frame_info["motion_regions"])
+            if center_y is not None:
+                # 标准化位置 (0-1)
+                normalized_y = center_y / frame_info["frame_height"]
+                positions.append(normalized_y)
+        
+        if len(positions) < 3:
+            return 0.0
+        
+        # 计算位置变化趋势
+        start_pos = positions[0]
+        end_pos = positions[-1]
+        position_change = end_pos - start_pos
+        
+        # 计算变化的一致性
+        changes = [positions[i+1] - positions[i] for i in range(len(positions)-1)]
+        consistent_downward = all(change > 0 for change in changes)  # 持续向下
+        
+        # 计算变化幅度
+        change_magnitude = abs(position_change)
+        
+        # 综合评分
+        score = 0.0
+        if consistent_downward and change_magnitude > 0.1:  # 持续向下且变化明显
+            score = min(change_magnitude * 2.0, 1.0)
+        elif change_magnitude > 0.2:  # 变化很大
+            score = min(change_magnitude, 1.0)
+        
+        return score
+    
+    def _analyze_velocity_pattern(self) -> float:
+        """分析速度模式"""
+        if len(self.vertical_velocity_history) < 3:
+            return 0.0
+        
+        # 检查是否有快速向下的速度
+        recent_velocities = self.vertical_velocity_history[-3:]
+        max_velocity = max(recent_velocities)
+        
+        # 检查速度变化的一致性
+        velocity_changes = [recent_velocities[i+1] - recent_velocities[i] 
+                          for i in range(len(recent_velocities)-1)]
+        
+        # 如果速度持续增加（向下），可能是跌倒
+        consistent_acceleration = all(change > 0 for change in velocity_changes)
+        
+        score = 0.0
+        if max_velocity > 50:  # 快速向下运动
+            score += 0.5
+        if consistent_acceleration:
+            score += 0.3
+        if max_velocity > 100:  # 非常快的运动
+            score += 0.2
+        
+        return min(score, 1.0)
+    
+    def _analyze_shape_change_advanced(self) -> float:
+        """高级形状变化分析"""
+        if len(self.fall_detection_history) < 3:
+            return 0.0
+        
+        # 分析最近3帧的形状变化
+        recent_frames = self.fall_detection_history[-3:]
+        shape_ratios = []
+        
+        for frame_info in recent_frames:
+            if frame_info["motion_regions"]:
+                largest_region = max(frame_info["motion_regions"], key=lambda r: r["area"])
+                ratio = largest_region["width"] / largest_region["height"] if largest_region["height"] > 0 else 1
+                shape_ratios.append(ratio)
+        
+        if len(shape_ratios) < 2:
+            return 0.0
+        
+        # 计算宽高比变化
+        ratio_changes = [abs(shape_ratios[i+1] - shape_ratios[i]) 
+                        for i in range(len(shape_ratios)-1)]
+        
+        # 如果宽高比变化很大，可能是从站立变为躺下
+        max_change = max(ratio_changes) if ratio_changes else 0
+        
+        score = 0.0
+        if max_change > 0.5:  # 形状变化很大
+            score = min(max_change, 1.0)
+        
+        return score
+    
+    def _analyze_temporal_pattern(self) -> float:
+        """分析时序模式"""
+        if len(self.fall_detection_history) < 5:
+            return 0.0
+        
+        # 分析运动强度的时序变化
+        intensities = [info["motion_intensity"] for info in self.fall_detection_history[-5:]]
+        
+        # 检查是否有运动强度突然增加然后减少的模式（跌倒特征）
+        if len(intensities) >= 3:
+            # 找到运动强度的峰值
+            peak_index = intensities.index(max(intensities))
+            
+            # 检查峰值前后的变化
+            if peak_index > 0 and peak_index < len(intensities) - 1:
+                before_peak = intensities[peak_index - 1]
+                at_peak = intensities[peak_index]
+                after_peak = intensities[peak_index + 1]
+                
+                # 如果峰值明显且之后下降，可能是跌倒
+                if at_peak > before_peak * 1.5 and after_peak < at_peak * 0.7:
+                    return min((at_peak - before_peak) * 2.0, 1.0)
+        
+        return 0.0
+    
+    def _analyze_state_machine_confidence(self) -> float:
+        """基于状态机的置信度分析"""
+        if self.fall_state == "fallen":
+            return 0.8
+        elif self.fall_state == "falling":
+            return 0.6
+        elif self.fall_state == "potential_fall":
+            return 0.3
+        else:
+            return 0.0
+    
+    def _adjust_adaptive_threshold(self, confidence: float):
+        """自适应调整阈值"""
+        old_threshold = self.adaptive_threshold
+        
+        # 如果连续多次高置信度但未检测到跌倒，降低阈值
+        # 如果连续多次误报，提高阈值
+        if confidence > 0.7 and self.fall_state == "normal":
+            self.adaptive_threshold = max(
+                self.adaptive_threshold - self.threshold_adjustment_rate * 0.1,
+                self.fall_detection_threshold * 0.5
+            )
+            if abs(self.adaptive_threshold - old_threshold) > 0.001:
+                self.fall_logger.debug(f"降低阈值: {old_threshold:.4f} -> {self.adaptive_threshold:.4f} (高置信度但未跌倒)")
+        elif confidence < 0.2 and self.fall_state != "normal":
+            self.adaptive_threshold = min(
+                self.adaptive_threshold + self.threshold_adjustment_rate * 0.1,
+                self.fall_detection_threshold * 1.5
+            )
+            if abs(self.adaptive_threshold - old_threshold) > 0.001:
+                self.fall_logger.debug(f"提高阈值: {old_threshold:.4f} -> {self.adaptive_threshold:.4f} (低置信度但状态异常)")
 
     def get_analysis_type(self) -> str:
         return "motion_detection"
     
     def get_text_result(self, analysis_data: Dict[str, Any]) -> str:
-        """返回文本格式的分析结果"""
+        """返回文本格式的分析结果 - 优化版本"""
         if not analysis_data:
             return "运动检测: 无数据"
         
@@ -322,6 +676,8 @@ class MotionDetector(BaseVideoAnalyzer):
         # 检查摔倒检测结果
         fall_detected = analysis_data.get("fall_detected", False)
         fall_confidence = analysis_data.get("fall_confidence", 0.0)
+        fall_state = analysis_data.get("fall_state", "normal")
+        fall_duration = analysis_data.get("fall_duration", 0.0)
         
         # 构建基础运动检测文本
         if motion_detected:
@@ -329,13 +685,32 @@ class MotionDetector(BaseVideoAnalyzer):
         else:
             motion_text = "运动检测: 无运动"
         
+        # 状态映射
+        state_emojis = {
+            "normal": "✅",
+            "potential_fall": "⚠️",
+            "falling": "🔻",
+            "fallen": "🚨"
+        }
+        
+        state_names = {
+            "normal": "正常",
+            "potential_fall": "潜在跌倒",
+            "falling": "跌倒中",
+            "fallen": "已跌倒"
+        }
+        
+        emoji = state_emojis.get(fall_state, "❓")
+        state_name = state_names.get(fall_state, fall_state)
+        
         # 如果有摔倒检测，添加摔倒信息
         if fall_detected:
-            return f"🚨 摔倒检测: 检测到摔倒事件！置信度{fall_confidence:.2f} | {motion_text}"
+            duration_text = f"持续{fall_duration:.1f}秒" if fall_duration > 0 else ""
+            return f"{emoji} 摔倒检测: 检测到摔倒事件！置信度{fall_confidence:.2f} ({state_name}) {duration_text} | {motion_text}"
         elif self.enable_fall_detection and fall_confidence > 0:
-            return f"⚠️ 运动检测: 摔倒风险{fall_confidence:.2f} | {motion_text}"
+            return f"{emoji} 运动检测: 摔倒风险{fall_confidence:.2f} ({state_name}) | {motion_text}"
         else:
-            return motion_text
+            return f"{emoji} {motion_text}"
 
 
 # 颜色分析器
